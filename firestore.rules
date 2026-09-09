@@ -1,0 +1,102 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid))
+           && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin")
+          ||
+          (exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+           && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == "admin")
+        );
+    }
+
+    /* USERS */
+    match /users/{userId} {
+      allow read: if signedIn() && (request.auth.uid == userId || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    /* PRODUCTS */
+    match /products/{productId} {
+      // Customers can view products
+      allow read: if true;
+      // Only admins can create/update/delete products
+      allow create, update, delete: if isAdmin();
+    }
+
+    /* ORDERS */
+    match /orders/{orderId} {
+      // Customers can create orders
+      allow create: if true;
+      // Admins can view, update, delete orders; customers can track by ID
+      allow read: if isAdmin() || true;
+      allow update, delete: if isAdmin();
+    }
+
+    /* CUSTOMERS */
+    match /customers/{customerId} {
+      allow read, write: if isAdmin() || true;
+    }
+
+    /* COUPONS */
+    match /coupons/{couponId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    /* REVIEWS */
+    match /reviews/{reviewId} {
+      // Anyone can read reviews
+      allow read: if true;
+      // Anyone can submit a review
+      allow create: if true;
+      // Only admins can approve, update or delete reviews
+      allow update, delete: if isAdmin();
+    }
+
+    /* INVENTORY */
+    match /inventory/{inventoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    /* CATEGORIES & SETTINGS */
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    /* SITE SETTINGS (Branding, Delivery, Payment) */
+    match /siteSettings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    /* COURIER SETTINGS (Steadfast, Pathao, Carrybee keys) */
+    match /courierSettings/{settingId} {
+      // Sensitive API credentials are restricted to Admins only
+      allow read, write: if isAdmin();
+    }
+
+    /* ADMINS */
+    match /admins/{adminId} {
+      // Only authenticated admins can read admin documents
+      allow read: if isAdmin();
+      // Do NOT allow frontend users to create admin accounts
+      allow create, update, delete: if false;
+    }
+  }
+}
