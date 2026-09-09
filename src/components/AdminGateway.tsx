@@ -1,11 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  onAuthStateListener,
-  checkIsAdmin,
-  logoutAdminFromFirebase,
-} from '../lib/firebase';
-import { AdminUser } from '../types';
+import { doc, getDoc } from 'firebase/firestore';
+import { onAuthStateChanged, signOut, User } from 'firebase/auth';
+import { auth, db } from '../lib/firebase';
 import AdminLogin from './AdminLogin';
 import { AdminDashboard } from './AdminDashboard';
 import { ShieldCheck, Loader2 } from 'lucide-react';
@@ -14,142 +11,161 @@ interface AdminGatewayProps {
   initialTab?: string;
 }
 
-export default function AdminGateway({ initialTab }: AdminGatewayProps = {}) {
-  // STATE 1: Firebase auth state is still loading
-  const [authStage, setAuthStage] = useState<
-    'loading' | 'signed_out' | 'authorized' | 'denied'
-  >('loading');
-  const [adminUser, setAdminUser] = useState<AdminUser | null>(null);
+type AuthStage =
+  | 'loading'
+  | 'signed_out'
+  | 'authorized'
+  | 'denied';
 
+export default function AdminGateway({
+  initialTab,
+}: AdminGatewayProps = {}) {
   const navigate = useNavigate();
 
+  const [authStage, setAuthStage] =
+    useState<AuthStage>('loading');
+
+  const [adminUser, setAdminUser] =
+    useState<any>(null);
+
   useEffect(() => {
-    let isMounted = true;
+    if (!auth || !db) {
+      console.error('Firebase Auth or Firestore is not initialized');
+      setAuthStage('signed_out');
+      return;
+    }
 
-    const unsubscribe = onAuthStateListener(async (user) => {
-      if (!isMounted) return;
+    let mounted = true;
 
-      if (!user) {
-        // STATE 2: No Firebase user is signed in -> Render AdminLogin
-        if (isMounted) {
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      async (user: User | null) => {
+        if (!mounted) return;
+
+        if (!user) {
           setAdminUser(null);
           setAuthStage('signed_out');
+          return;
         }
-        return;
-      }
 
-      // STATE 3: User signed in via Firebase -> Check Firestore users/{user.uid}
-      try {
-        const isAdmin = await checkIsAdmin(user.uid);
+        try {
+          const userRef = doc(db!, 'users', user.uid);
+          const snapshot = await getDoc(userRef);
 
-        if (!isMounted) return;
+          if (!mounted) return;
 
-        if (isAdmin) {
+          const data = snapshot.exists()
+            ? snapshot.data()
+            : null;
+
+          // Temporary safe diagnostics.
+          console.log('Admin auth UID:', user.uid);
+          console.log(
+            'Admin document exists:',
+            snapshot.exists()
+          );
+          console.log('Admin role:', data?.role);
+          console.log('Admin active:', data?.active);
+
+          const authorized =
+            snapshot.exists() &&
+            data?.role === 'admin' &&
+            data?.active === true;
+
+          if (!authorized) {
+            await signOut(auth!);
+
+            if (mounted) {
+              setAdminUser(null);
+              setAuthStage('denied');
+            }
+
+            return;
+          }
+
           setAdminUser({
             uid: user.uid,
             email: user.email || '',
             role: 'admin',
           });
+
           setAuthStage('authorized');
-        } else {
-          // If Firebase authentication succeeds but role/active verification fails:
-          // signOut(auth) then return to the login form and show: "Access denied"
-          await logoutAdminFromFirebase();
-          if (isMounted) {
+        } catch (error) {
+          console.error(
+            'Admin Firestore verification error:',
+            error
+          );
+
+          try {
+            await signOut(auth!);
+          } catch {}
+
+          if (mounted) {
             setAdminUser(null);
             setAuthStage('denied');
           }
         }
-      } catch (err) {
-        console.warn('Admin authorization check failed:', err);
-        await logoutAdminFromFirebase();
-        if (isMounted) {
-          setAdminUser(null);
-          setAuthStage('denied');
-        }
       }
-    });
+    );
 
     return () => {
-      isMounted = false;
+      mounted = false;
       unsubscribe();
     };
   }, []);
 
   const handleLogout = async () => {
-    await logoutAdminFromFirebase();
+    if (auth) {
+      await signOut(auth);
+    }
+
     setAdminUser(null);
     setAuthStage('signed_out');
   };
 
-  // STATE 1 — Firebase auth state is still loading:
-  // Show a CLOTHIQO loading/verification screen.
-  // Do NOT show Access denied.
+  const showLogin = (error?: string) => (
+    <AdminLogin
+      initialError={error}
+      onSuccess={(user) => {
+        setAdminUser(user);
+        setAuthStage('authorized');
+      }}
+      onLoginSuccess={(user) => {
+        setAdminUser(user);
+        setAuthStage('authorized');
+      }}
+      onBackToStore={() => navigate('/')}
+      onCancel={() => navigate('/')}
+    />
+  );
+
   if (authStage === 'loading') {
     return (
-      <div className="min-h-screen w-screen flex flex-col items-center justify-center bg-[#f7f5ee] text-[#111111] font-sans px-4">
-        <div className="flex flex-col items-center gap-3 p-8 bg-white rounded-3xl border border-[#e8e2d5] shadow-lg max-w-sm w-full text-center">
-          <div className="w-10 h-10 rounded-2xl bg-amber-100 flex items-center justify-center text-amber-900 mb-1">
-            <ShieldCheck className="w-5 h-5" />
-          </div>
-          <h2 className="text-lg font-black uppercase tracking-tight text-[#111111]">
+      <div className="min-h-screen w-full flex items-center justify-center bg-[#f7f5ee] px-4">
+        <div className="flex w-full max-w-sm flex-col items-center gap-3 rounded-3xl border border-[#e8e2d5] bg-white p-8 text-center shadow-lg">
+          <ShieldCheck className="h-6 w-6" />
+
+          <h2 className="text-lg font-black uppercase">
             CLOTHIQO ADMIN
           </h2>
-          <div className="flex items-center gap-2 text-xs font-semibold text-[#666666]">
-            <Loader2 className="w-4 h-4 animate-spin text-amber-900" />
-            <span>Verifying admin session...</span>
+
+          <div className="flex items-center gap-2 text-xs font-semibold text-[#666]">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Verifying admin session...
           </div>
         </div>
       </div>
     );
   }
 
-  // STATE 2 — No Firebase user is signed in:
-  // Render <AdminLogin />.
-  // The login form must contain ONLY:
-  // - Email
-  // - Password
-  // - Login
-  // - Back to Store
-  // Fields start empty.
   if (authStage === 'signed_out') {
-    return (
-      <AdminLogin
-        onSuccess={(user) => {
-          setAdminUser(user);
-          setAuthStage('authorized');
-        }}
-        onLoginSuccess={(user) => {
-          setAdminUser(user);
-          setAuthStage('authorized');
-        }}
-        onBackToStore={() => navigate('/')}
-        onCancel={() => navigate('/')}
-      />
-    );
+    return showLogin();
   }
 
-  // If Firebase authentication succeeds but role/active verification fails:
-  // Return to the login form and show: "Access denied"
   if (authStage === 'denied') {
-    return (
-      <AdminLogin
-        initialError="Access denied"
-        onSuccess={(user) => {
-          setAdminUser(user);
-          setAuthStage('authorized');
-        }}
-        onLoginSuccess={(user) => {
-          setAdminUser(user);
-          setAuthStage('authorized');
-        }}
-        onBackToStore={() => navigate('/')}
-        onCancel={() => navigate('/')}
-      />
-    );
+    return showLogin('Access denied');
   }
 
-  // Authorized Admin -> Render <AdminDashboard />
   return (
     <AdminDashboard
       admin={adminUser}
